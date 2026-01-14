@@ -223,6 +223,14 @@
         sections (filter some? [input-section output-section interaction-format instructions-section])]
     (str/join "\n" sections)))
 
+(defn- strip-completion-marker
+  "Remove the [[ ## completed ## ]] marker and anything after it from a string."
+  [s]
+  (when s
+    (-> s
+        (str/replace #"\[\[\s*##\s*completed\s*##\s*\]\].*$" "")
+        (str/trim))))
+
 (defn parse-output
   "Parse LLM output based on module's output field definitions.
 
@@ -242,7 +250,9 @@
                         (let [pattern (re-pattern (str "\\[\\[\\s*##\\s*" (name field-name) "\\s*##\\s*\\]\\]\\s*\\n([\\s\\S]*?)(?=\\n\\[\\[\\s*##|$)"))
                               match (re-find pattern text)]
                           (when match
-                            (str/trim (second match)))))
+                            (-> (second match)
+                                (str/trim)
+                                (strip-completion-marker)))))
 
         ;; Get base type from spec (unwrap [:string {:min 1}] -> :string)
         base-type (fn [spec]
