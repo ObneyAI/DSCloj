@@ -49,10 +49,12 @@
 (defn complex-spec?
   "Check if a Malli spec requires JSON serialization.
   Returns true for :map, :map-of, :vector, :sequential, :set, :tuple, etc.
+  Handles both bare keywords (:map) and vector forms ([:map ...]).
   Note: :enum is NOT included - enums are plain string values."
   [spec]
-  (and (vector? spec)
-       (#{:map :map-of :vector :sequential :set :tuple :or :and :maybe} (first spec))))
+  (or (#{:map :map-of :vector :sequential :set :tuple} spec)
+      (and (vector? spec)
+           (#{:map :map-of :vector :sequential :set :tuple :or :and :maybe} (first spec)))))
 
 (defn spec->type-str
   "Convert Malli spec to string type representation.
@@ -71,6 +73,14 @@
     (= spec 'double?) "float"
     (= spec 'float?) "float"
     (= spec 'boolean?) "bool"
+
+    ;; Bare keyword complex types
+    (= spec :map) "json object"
+    (= spec :map-of) "json object"
+    (= spec :vector) "json array"
+    (= spec :sequential) "json array"
+    (= spec :set) "json array (unique items)"
+    (= spec :tuple) "json array"
 
     ;; Map - describe fields as JSON object
     (and (vector? spec) (= :map (first spec)))
@@ -184,6 +194,13 @@
     (= spec :float) {:type "number"}
     (= spec :boolean) {:type "boolean"}
     (= spec :any) {}
+    ;; Bare keyword complex types
+    (= spec :map) {:type "object"}
+    (= spec :map-of) {:type "object"}
+    (= spec :vector) {:type "array"}
+    (= spec :sequential) {:type "array"}
+    (= spec :set) {:type "array" :uniqueItems true}
+    (= spec :tuple) {:type "array"}
     (= spec 'string?) {:type "string"}
     (= spec 'int?) {:type "integer"}
     (= spec 'double?) {:type "number"}
