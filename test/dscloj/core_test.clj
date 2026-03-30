@@ -426,3 +426,81 @@
           tool-def (dscloj/outputs->tool-definition module)]
       (is (= "Submit the structured response"
              (get-in tool-def [:function :description]))))))
+
+;; =============================================================================
+;; Multimodal Image Input Tests
+;; =============================================================================
+
+(deftest build-message-content-test
+  (testing "Text-only module returns plain string"
+    (let [module {:inputs [{:name :question :spec :string :description "Q"}]
+                  :outputs [{:name :answer :spec :string :description "A"}]}
+          result (dscloj/build-message-content module "Hello" {:question "Hi"})]
+      (is (string? result))
+      (is (= "Hello" result))))
+
+  (testing "Module with image input returns vector of content parts"
+    (let [module {:inputs [{:name :question :spec :string :description "Q"}
+                           {:name :photo :type :image :description "An image"}]
+                  :outputs [{:name :answer :spec :string :description "A"}]}
+          result (dscloj/build-message-content module "Describe this"
+                   {:question "What is this?" :photo "data:image/png;base64,abc123"})]
+      (is (vector? result))
+      (is (= 2 (count result)))
+      (is (= {:type "text" :text "Describe this"} (first result)))
+      (is (= {:type "image_url" :image_url {:url "data:image/png;base64,abc123"}}
+             (second result)))))
+
+  (testing "Single image value (not wrapped in seq) works"
+    (let [module {:inputs [{:name :img :type :image :description "Image"}]
+                  :outputs [{:name :out :spec :string}]}
+          result (dscloj/build-message-content module "prompt" {:img "https://example.com/img.png"})]
+      (is (vector? result))
+      (is (= 2 (count result)))
+      (is (= "https://example.com/img.png"
+             (get-in (second result) [:image_url :url])))))
+
+  (testing "Multiple images from a lazy seq work"
+    (let [module {:inputs [{:name :photos :type :image :description "Photos"}]
+                  :outputs [{:name :out :spec :string}]}
+          urls (map #(str "https://example.com/" % ".png") (range 3))
+          result (dscloj/build-message-content module "prompt" {:photos urls})]
+      (is (vector? result))
+      ;; 1 text part + 3 image parts
+      (is (= 4 (count result)))
+      (is (= "text" (:type (first result))))
+      (is (every? #(= "image_url" (:type %)) (rest result)))))
+
+  (testing "Nil image value is excluded"
+    (let [module {:inputs [{:name :img :type :image :description "Image"}]
+                  :outputs [{:name :out :spec :string}]}
+          result (dscloj/build-message-content module "prompt" {:img nil})]
+      (is (vector? result))
+      (is (= 1 (count result)))
+      (is (= {:type "text" :text "prompt"} (first result))))))
+
+(deftest validate-inputs-skips-image-fields-test
+  (testing "Image fields are skipped during validation"
+    (let [fields [{:name :question :spec :string :description "Q"}
+                  {:name :photo :type :image :spec :string :description "Photo"}]
+          ;; photo value is not a string — would fail :string validation if not skipped
+          input {:question "What is this?" :photo ["data:image/png;base64,abc"]}]
+      (is (= input (dscloj/validate-inputs fields input)))))
+
+  (testing "Non-image fields still validate"
+    (let [fields [{:name :count :spec :int :description "Count"}
+                  {:name :photo :type :image :description "Photo"}]
+          input {:count "not-a-number" :photo "data:image/png;base64,abc"}]
+      (is (thrown? Exception (dscloj/validate-inputs fields input))))))
+
+(deftest module-prompt-excludes-image-inputs-test
+  (testing "Image inputs are excluded from prompt template"
+    (let [module {:inputs [{:name :question :spec :string :description "The question"}
+                           {:name :photo :type :image :description "A photo"}]
+                  :outputs [{:name :answer :spec :string :description "The answer"}]
+                  :instructions "Describe the image."}
+          prompt (dscloj/module->prompt module)]
+      ;; question should appear in the prompt
+      (is (re-find #"question" prompt))
+      ;; photo should NOT appear in field listing or interaction format
+      (is (not (re-find #"photo" prompt))))))

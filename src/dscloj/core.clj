@@ -142,8 +142,8 @@
   Returns input-map if valid, throws exception if invalid."
   [fields input-map]
   (doseq [field fields]
-    (let [{:keys [name spec]} field]
-      (when spec
+    (let [{:keys [name spec type]} field]
+      (when (and spec (not= type :image))
         (when-let [value (get input-map name)]
           (validate-field field value)))))
   input-map)
@@ -342,23 +342,25 @@
         format-field (fn [idx {:keys [name spec description]}]
                        (let [type-str (spec->type-str spec)]
                          (str (inc idx) ". `" (clojure.core/name name) "` (" type-str "): " description)))
-        
-        ;; Input fields section
-        input-section (when (seq inputs)
+
+        ;; Input fields section (exclude image inputs — they're sent as content parts, not text)
+        text-inputs (remove #(= :image (:type %)) inputs)
+        input-section (when (seq text-inputs)
                         (str "Your input fields are:\n"
-                             (str/join "\n" (map-indexed format-field inputs))))
-        
+                             (str/join "\n" (map-indexed format-field text-inputs))))
+
         ;; Output fields section
         output-section (when (seq outputs)
                          (str "Your output fields are:\n"
                               (str/join "\n" (map-indexed format-field outputs))))
-        
-        ;; Interaction format section (includes both inputs and outputs)
-        interaction-format (when (or (seq inputs) (seq outputs))
+
+        ;; Interaction format section (includes both inputs and outputs, excluding image inputs)
+        non-image-inputs (remove #(= :image (:type %)) inputs)
+        interaction-format (when (or (seq non-image-inputs) (seq outputs))
                              (str "All interactions will be structured in the following way, with the appropriate values filled in.\n\n"
                                   (str/join "\n\n"
                                     (concat
-                                      (for [{:keys [name]} inputs]
+                                      (for [{:keys [name]} non-image-inputs]
                                         (str "[[ ## " (clojure.core/name name) " ## ]]\n"
                                              "{" (clojure.core/name name) "}"))
                                       (for [{:keys [name spec]} outputs]
@@ -452,26 +454,46 @@
                   converted-value (convert-value raw-value spec)]
               [name converted-value])))))
 
+(defn build-message-content
+  "Build message content for an LLM call, supporting multimodal inputs.
+  If the module has any inputs with :type :image, returns a vector of content
+  parts (text + images). Otherwise returns the prompt as a plain string."
+  [module prompt input-map]
+  (let [image-inputs (filter #(= :image (:type %)) (:inputs module))]
+    (if (empty? image-inputs)
+      prompt
+      (let [image-parts (for [{:keys [name]} image-inputs
+                              :let [v (get input-map name)]
+                              :when v
+                              img (if (sequential? v) v [v])]
+                          {:type "image_url" :image_url {:url img}})]
+        (into [{:type "text" :text prompt}] image-parts)))))
+
 (defn- predict-with-function-calling
   "Internal: Make a prediction using function calling for structured output."
   [provider-config module validated-input options]
   (let [{:keys [inputs outputs instructions]} module
 
-        ;; Build a clean prompt with inputs and instructions
+        ;; Build a clean prompt with inputs and instructions (skip image inputs)
+        image-input-names (set (map :name (filter #(= :image (:type %)) inputs)))
         input-section (str/join "\n\n"
-                                (for [{:keys [name description]} inputs]
+                                (for [{:keys [name description]} inputs
+                                      :when (not (image-input-names name))]
                                   (str (clojure.core/name name) ": " (get validated-input name ""))))
 
         prompt (str (when instructions (str instructions "\n\n"))
                     "Given the following inputs:\n" input-section
                     "\n\nCall the submit_response function with your answer.")
 
+        ;; Build multimodal content if needed
+        content (build-message-content module prompt validated-input)
+
         ;; Create tool definition from outputs
         tool-def (outputs->tool-definition module)
 
         ;; Call LLM with function calling
         response (router/completion provider-config
-                                    (merge {:messages [{:role :user :content prompt}]
+                                    (merge {:messages [{:role :user :content content}]
                                             :tools [tool-def]
                                             :tool_choice {:type "function"
                                                           :function {:name "submit_response"}}}
@@ -485,18 +507,23 @@
   (let [;; Generate base prompt from module
         base-prompt (module->prompt module)
 
-        ;; Add input values to the prompt
+        ;; Add input values to the prompt (skip :image inputs — they're sent as content parts)
+        image-input-names (set (map :name (filter #(= :image (:type %)) (:inputs module))))
         input-section (str/join "\n\n"
-                                (for [{:keys [name]} (:inputs module)]
+                                (for [{:keys [name]} (:inputs module)
+                                      :when (not (image-input-names name))]
                                   (str "[[ ## " (clojure.core/name name) " ## ]]\n"
                                        (get validated-input name ""))))
 
         ;; Combine into full prompt
         full-prompt (str base-prompt "\n\n" input-section)
 
+        ;; Build multimodal content if needed
+        content (build-message-content module full-prompt validated-input)
+
         ;; Call LLM via router API
         response (router/completion provider-config
-                                    (merge {:messages [{:role :user :content full-prompt}]}
+                                    (merge {:messages [{:role :user :content content}]}
                                            (dissoc options :validate? :with-metadata? :use-function-calling?)))]
     {:parsed (parse-output (-> response :choices first :message :content) module)
      :response response}))
@@ -649,22 +676,27 @@
         
         ;; Generate base prompt from module
         base-prompt (module->prompt module)
-        
-        ;; Add input values to the prompt
+
+        ;; Add input values to the prompt (skip :image inputs — they're sent as content parts)
+        image-input-names (set (map :name (filter #(= :image (:type %)) (:inputs module))))
         input-section (str/join "\n\n"
-                                (for [{:keys [name]} (:inputs module)]
+                                (for [{:keys [name]} (:inputs module)
+                                      :when (not (image-input-names name))]
                                   (str "[[ ## " (clojure.core/name name) " ## ]]\n"
                                        (get validated-input name ""))))
-        
+
         ;; Combine into full prompt
         full-prompt (str base-prompt "\n\n" input-section)
-        
+
+        ;; Build multimodal content if needed
+        content (build-message-content module full-prompt validated-input)
+
         ;; Create output channel
         output-ch (chan)
-        
+
         ;; Call LLM with streaming enabled via router API
         stream-ch (router/completion provider-config
-                                    (merge {:messages [{:role :user :content full-prompt}]
+                                    (merge {:messages [{:role :user :content content}]
                                             :stream true}
                                            (dissoc options :on-chunk :debounce-ms :validate?)))
         
