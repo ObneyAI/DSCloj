@@ -1,5 +1,6 @@
 (ns dscloj.core-test
   (:require [clojure.test :refer [deftest is testing]]
+            [litellm.router]
             [dscloj.core :as dscloj]))
 
 (deftest module->prompt-test
@@ -504,3 +505,66 @@
       (is (re-find #"question" prompt))
       ;; photo should NOT appear in field listing or interaction format
       (is (not (re-find #"photo" prompt))))))
+
+(deftest predict-with-metadata-includes-raw-response-test
+  (testing "with-metadata? true returns the verbatim completion text as :raw-response"
+    (let [raw "Some free-form answer the model wrote without any field markers."
+          module {:inputs [{:name :question :spec :string :description "The question"}]
+                  :outputs [{:name :answer :spec :string :description "The answer"}]
+                  :instructions "Answer the question."}
+          fake-response {:choices [{:message {:role :assistant :content raw}
+                                    :finish-reason "stop"}]
+                         :usage {:prompt-tokens 10 :completion-tokens 20 :total-tokens 30}
+                         :model "fake-model"}]
+      (with-redefs [litellm.router/completion (fn [& _] fake-response)]
+        (let [result (dscloj/predict {:provider :openai :model "fake" :config {}}
+                                     module
+                                     {:question "What?"}
+                                     {:validate? false
+                                      :use-function-calling? false
+                                      :with-metadata? true})]
+          ;; raw-response carries the verbatim text regardless of parse outcome
+          (is (= raw (:raw-response result)))
+          ;; single string-field + no marker → the whole-text fallback fills it
+          (is (= raw (get-in result [:outputs :answer])))
+          (is (= 30 (get-in result [:usage :total-tokens]))))))
+
+    (testing "complex-spec single field with no marker still parses to nil — raw-response is the recovery channel"
+      ;; The whole-text fallback only applies to STRING-typed single fields.
+      ;; A vector/map output (like an RLM :key-dates node) cannot use it, so a
+      ;; markerless response yields nil — exactly the case where raw-response
+      ;; capture lets a caller diagnose / recover.
+      (let [raw "Here are the dates: Feb 13, Mar 31 — no field markers at all."
+            module {:inputs [{:name :question :spec :string :description "The question"}]
+                    :outputs [{:name :dates :spec [:vector :string] :description "Dates"}]
+                    :instructions "List dates."}
+            fake-response {:choices [{:message {:role :assistant :content raw}}]
+                           :usage {:prompt-tokens 5 :completion-tokens 5 :total-tokens 10}
+                           :model "fake-model"}]
+        (with-redefs [litellm.router/completion (fn [& _] fake-response)]
+          (let [result (dscloj/predict {:provider :openai :model "fake" :config {}}
+                                       module
+                                       {:question "What?"}
+                                       {:validate? false
+                                        :use-function-calling? false
+                                        :with-metadata? true})]
+            (is (nil? (get-in result [:outputs :dates])))
+            (is (= raw (:raw-response result)))))))
+
+    (testing "marker-bearing response parses AND raw-response is still present"
+      (let [raw "[[ ## answer ## ]]\n42\n[[ ## completed ## ]]"
+            module {:inputs [{:name :question :spec :string :description "The question"}]
+                    :outputs [{:name :answer :spec :string :description "The answer"}]
+                    :instructions "Answer."}
+            fake-response {:choices [{:message {:role :assistant :content raw}}]
+                           :usage {:prompt-tokens 1 :completion-tokens 1 :total-tokens 2}
+                           :model "fake-model"}]
+        (with-redefs [litellm.router/completion (fn [& _] fake-response)]
+          (let [result (dscloj/predict {:provider :openai :model "fake" :config {}}
+                                       module
+                                       {:question "What?"}
+                                       {:validate? false
+                                        :use-function-calling? false
+                                        :with-metadata? true})]
+            (is (= "42" (get-in result [:outputs :answer])))
+            (is (= raw (:raw-response result)))))))))

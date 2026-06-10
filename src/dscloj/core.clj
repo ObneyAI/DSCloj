@@ -568,7 +568,10 @@
 
   Returns:
   - If :with-metadata? is false (default): parsed output map based on module's output fields
-  - If :with-metadata? is true: {:outputs {...} :usage {:prompt_tokens N :completion_tokens N :total_tokens N} :model \"...\"}
+  - If :with-metadata? is true: {:outputs {...} :usage {:prompt_tokens N :completion_tokens N :total_tokens N} :model \"...\" :raw-response \"...\"}
+    (:raw-response is the verbatim completion text — present so callers can
+    diagnose/recover when marker parsing yields nil fields; may be nil for
+    function-calling responses without text content)
 
   Examples:
     ;; Using registered provider
@@ -622,7 +625,12 @@
     (if with-metadata?
       {:outputs validated-output
        :usage (:usage response)
-       :model (:model response)}
+       :model (:model response)
+       ;; Raw completion text, verbatim. Callers need this when parse-output
+       ;; returns nil fields (e.g. the model omitted the [[ ## field ## ]]
+       ;; markers) — without it the unparseable response is unrecoverable.
+       ;; Nil for function-calling responses that carry no text content.
+       :raw-response (-> response :choices first :message :content)}
       validated-output)))
 
 ;; =============================================================================
