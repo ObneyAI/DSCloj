@@ -232,3 +232,22 @@
           (is (not (contains? @req :debounce-ms)))
           (is (not (contains? @req :validate?)))
           (is (vector? (:messages @req))))))))
+
+(deftest single-string-field-whole-text-fallback
+  (testing "marker-less prose becomes the single string field's value"
+    (is (= {:answer "Hello there!"}
+           (dscloj/parse-output "Hello there!"
+                                {:outputs [{:name :answer :spec :string}]}))))
+  (testing "marker output still parses normally"
+    (is (= {:answer "Hi."}
+           (dscloj/parse-output "[[ ## answer ## ]]\nHi."
+                                {:outputs [{:name :answer :spec :string}]}))))
+  (testing "multi-field modules stay strict"
+    (is (= {:a nil :b nil}
+           (dscloj/parse-output "plain text"
+                                {:outputs [{:name :a :spec :string}
+                                           {:name :b :spec :string}]}))))
+  (testing "non-string single fields stay strict"
+    (is (= {:flag nil}
+           (dscloj/parse-output "plain text"
+                                {:outputs [{:name :flag :spec :boolean}]})))))

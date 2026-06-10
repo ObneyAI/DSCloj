@@ -447,12 +447,33 @@
                             (#{:double :float 'double? 'float?} base)
                             (try (Double/parseDouble value) (catch Exception _ value))
 
-                            :else value)))]
-    (into {}
-          (for [{:keys [name spec]} outputs]
-            (let [raw-value (extract-field name response)
-                  converted-value (convert-value raw-value spec)]
-              [name converted-value])))))
+                            :else value)))
+        parsed (into {}
+                     (for [{:keys [name spec]} outputs]
+                       (let [raw-value (extract-field name response)
+                             converted-value (convert-value raw-value spec)]
+                         [name converted-value])))]
+    ;; Single-field fallback: models answering a one-output-field module
+    ;; often write plain prose and skip the field markers entirely —
+    ;; especially under long task instructions. When that single field is
+    ;; string-typed, treat the whole response as its value rather than
+    ;; returning nil. Multi-field modules stay strict (no way to split
+    ;; unmarked text). This is also what makes single-field modules
+    ;; reliably streamable: progressive parses yield text-so-far from the
+    ;; first delta.
+    (let [single (when (= 1 (count outputs)) (first outputs))
+          single-base (when single
+                        (let [spec (:spec single)]
+                          (if (and (vector? spec) (not (complex-spec? spec)))
+                            (first spec)
+                            spec)))]
+      (if (and single
+               (contains? #{:string 'string? nil} single-base)
+               (every? nil? (vals parsed))
+               (string? response)
+               (not (str/blank? response)))
+        {(:name single) (-> response str/trim strip-completion-marker)}
+        parsed))))
 
 (defn build-message-content
   "Build message content for an LLM call, supporting multimodal inputs.
