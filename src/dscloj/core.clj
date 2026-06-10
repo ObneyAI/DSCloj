@@ -741,6 +741,181 @@
             (when (seq validated-output)
               (>! output-ch validated-output)))
           (close! output-ch))))
-    
+
+    ;; Return the output channel
+    output-ch))
+
+(defn- accumulate-stream-usage
+  "Merge one usage map from a streaming chunk into the accumulated usage.
+  Provider streaming contracts differ: OpenAI-style providers send a single
+  final usage-bearing chunk, while Anthropic-style providers (via litellm)
+  send usage on message_start AND message_delta chunks where counts are
+  CUMULATIVE (not increments) and :prompt-tokens may be nil. So per key we
+  keep the latest non-nil value — never summing, never throwing on nil."
+  [acc usage]
+  (reduce-kv (fn [m k v] (if (some? v) (assoc m k v) m))
+             (or acc {})
+             usage))
+
+(defn- finalize-stream-usage
+  "Derive :total-tokens as (+ prompt completion) when both are known;
+  otherwise keep the latest non-nil :total-tokens as accumulated."
+  [{:keys [prompt-tokens completion-tokens] :as usage}]
+  (if (and prompt-tokens completion-tokens)
+    (assoc usage :total-tokens (+ prompt-tokens completion-tokens))
+    usage))
+
+(defn predict-stream-v2
+  "Stream predictions from an LLM with a typed-event channel contract via router API.
+
+  Unlike `predict-stream`, the returned channel emits maps discriminated by
+  :dscloj/event, surfaces usage/model metadata, propagates provider errors
+  instead of swallowing them, and always ends with an explicit terminal event
+  before closing:
+
+    {:dscloj/event :delta  :text \"<raw content delta>\"}
+        Every content chunk, un-debounced, in arrival order.
+
+    {:dscloj/event :fields :fields {<output-field kw> <parsed-so-far>}}
+        Debounced progressive parse of the accumulated text (via
+        parse-streaming-output). Only emitted when the parse yields something.
+
+    {:dscloj/event :error  :error {<error info from the litellm error chunk>}}
+        TERMINAL. Emitted when the underlying stream carries a litellm error
+        chunk (litellm.streaming/is-error-chunk?). The channel closes
+        immediately after; no :final event follows.
+
+    {:dscloj/event :final  :outputs {<parsed outputs>} :usage {...} :model \"...\"}
+        TERMINAL on success. Exactly one, then the channel closes.
+        :outputs — final parse of the full accumulated text (validated with
+                   validate-outputs when :validate? is true; validation
+                   failures are tolerated and the unvalidated parse is kept).
+        :usage   — token usage accumulated across all chunks carrying :usage.
+                   Per key the latest non-nil value wins (provider streaming
+                   counts are cumulative — e.g. Anthropic message_delta usage
+                   — so values are never summed). :total-tokens is computed as
+                   (+ prompt completion) when both are known, otherwise the
+                   latest non-nil :total-tokens is kept. nil when no chunk
+                   carried usage.
+        :model   — :model from the last chunk carrying it, else nil.
+
+  Parameters:
+  - provider-config: Either a keyword referencing a registered provider config,
+                     or a map {:provider :openai :model \"gpt-4\" :config {:api-key \"...\"}}
+  - module: The module definition with :inputs/:outputs fields
+  - input-map: Map of input field names to values
+  - options: Optional configuration map
+
+  Options:
+  - :temperature - Temperature for sampling
+  - :debounce-ms - Milliseconds to debounce :fields emissions (default: 50)
+  - :validate? - Whether to validate inputs/outputs with Malli specs (default: false)
+  - Any other options are passed through to the underlying completion call
+    (always with :stream true)
+
+  Returns: core.async channel emitting the event maps above; the channel closes
+  after the terminal event (:final or :error).
+
+  Example:
+    (let [ch (predict-stream-v2 :gpt4 qa-module {:question \"What is 2+2?\"})]
+      (go-loop []
+        (when-let [{:keys [text fields] :as evt} (<! ch)]
+          (case (:dscloj/event evt)
+            :delta  (print text)
+            :fields (render-partial fields)
+            :error  (report-error (:error evt))
+            :final  (handle-result (:outputs evt) (:usage evt) (:model evt)))
+          (recur))))"
+  [provider-config module input-map & [options]]
+  (let [should-validate? (get options :validate? false)
+        validated-input (if should-validate?
+                          (validate-inputs (:inputs module) input-map)
+                          input-map)
+
+        ;; Generate base prompt from module (identical to predict-stream)
+        base-prompt (module->prompt module)
+
+        ;; Add input values to the prompt (skip :image inputs — they're sent as content parts)
+        image-input-names (set (map :name (filter #(= :image (:type %)) (:inputs module))))
+        input-section (str/join "\n\n"
+                                (for [{:keys [name]} (:inputs module)
+                                      :when (not (image-input-names name))]
+                                  (str "[[ ## " (clojure.core/name name) " ## ]]\n"
+                                       (get validated-input name ""))))
+
+        ;; Combine into full prompt
+        full-prompt (str base-prompt "\n\n" input-section)
+
+        ;; Build multimodal content if needed
+        content (build-message-content module full-prompt validated-input)
+
+        ;; Create output channel
+        output-ch (chan)
+
+        ;; Call LLM with streaming enabled via router API
+        stream-ch (router/completion provider-config
+                                     (merge {:messages [{:role :user :content content}]
+                                             :stream true}
+                                            (dissoc options :on-chunk :debounce-ms :validate?)))
+
+        debounce-ms (get options :debounce-ms 50)
+
+        ;; Track accumulated content, metadata, and last :fields emission time
+        accumulated (atom "")
+        usage-acc (atom nil)
+        model-acc (atom nil)
+        last-emit-time (atom 0)]
+
+    ;; Process stream in background
+    (go-loop []
+      (if-let [chunk (<! stream-ch)]
+        (if (streaming/is-error-chunk? chunk)
+          ;; TERMINAL: error chunk — emit :error and close. No :final follows.
+          (do
+            (>! output-ch {:dscloj/event :error
+                           :error (dissoc chunk :type)})
+            (close! stream-ch)
+            (close! output-ch))
+          (do
+            ;; Accumulate usage/model metadata from any chunk carrying them.
+            ;; Latest non-nil value per key wins (cumulative semantics — see
+            ;; accumulate-stream-usage); never summed.
+            (when-let [usage (:usage chunk)]
+              (swap! usage-acc accumulate-stream-usage usage))
+            (when-let [model (:model chunk)]
+              (reset! model-acc model))
+
+            ;; Content delta
+            (when-let [delta (streaming/extract-content chunk)]
+              (swap! accumulated str delta)
+
+              ;; Un-debounced raw delta
+              (>! output-ch {:dscloj/event :delta :text delta})
+
+              ;; Debounced progressive parse
+              (let [now (System/currentTimeMillis)
+                    elapsed (- now @last-emit-time)]
+                (when (>= elapsed debounce-ms)
+                  (let [parsed (parse-streaming-output @accumulated module)]
+                    (when (and (seq parsed) (some some? (vals parsed)))
+                      (>! output-ch {:dscloj/event :fields :fields parsed}))
+                    (reset! last-emit-time now)))))
+            (recur)))
+        ;; TERMINAL: stream complete — emit exactly one :final and close.
+        (do
+          (let [final-parsed (parse-streaming-output @accumulated module)
+                outputs (if should-validate?
+                          (try
+                            (validate-outputs (:outputs module) final-parsed)
+                            (catch Exception e
+                              (println "Warning: Final output validation failed:" (.getMessage e))
+                              final-parsed))
+                          final-parsed)]
+            (>! output-ch {:dscloj/event :final
+                           :outputs outputs
+                           :usage (some-> @usage-acc finalize-stream-usage)
+                           :model @model-acc}))
+          (close! output-ch))))
+
     ;; Return the output channel
     output-ch))
