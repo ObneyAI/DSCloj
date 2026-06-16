@@ -378,6 +378,31 @@
     (is (= {:type "object" :additionalProperties {:type "string"}}
            (dscloj/malli-spec->json-schema [:map-of :keyword :string]))))
 
+  (testing "Collection schemas with a properties/options map use the REAL item schema
+            (not the {:description ...} map) — e.g. [:vector {:description ...} item]"
+    ;; THE BUG: [:vector {opts} [:map ...]] previously took (second spec) = the opts map
+    ;; as the item → items {:type \"string\"}, telling the model 'array of strings'.
+    (let [s (dscloj/malli-spec->json-schema
+             [:vector {:description "verdicts"} [:map [:verdict :string] [:reason :string]]])]
+      (is (= "array" (:type s)))
+      (is (= "object" (get-in s [:items :type])) "item is an OBJECT, not a string")
+      (is (= {:type "string"} (get-in s [:items :properties "verdict"]))))
+    ;; nested object inside the item survives too (location {line,token})
+    (let [s (dscloj/malli-spec->json-schema
+             [:vector {:description "v"} [:map [:location [:map [:line :int] [:token :int]]]]])]
+      (is (= "object" (get-in s [:items :properties "location" :type]))))
+    (is (= {:type "array" :items {:type "string"}}
+           (dscloj/malli-spec->json-schema [:vector {:description "x"} :string])))
+    (is (= {:type "array" :items {:type "string"} :uniqueItems true}
+           (dscloj/malli-spec->json-schema [:set {:description "x"} :string])))
+    (is (= {:type "string" :nullable true}
+           (dscloj/malli-spec->json-schema [:maybe {:description "x"} :string])))
+    (is (= {:type "object" :additionalProperties {:type "string"}}
+           (dscloj/malli-spec->json-schema [:map-of {:description "x"} :keyword :string])))
+    ;; regression: the no-properties forms still work
+    (is (= {:type "array" :items {:type "string"}}
+           (dscloj/malli-spec->json-schema [:vector :string]))))
+
   (testing "Nested structures"
     (let [schema (dscloj/malli-spec->json-schema
                    [:map [:user [:map [:name :string]]]])]
