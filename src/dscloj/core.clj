@@ -207,6 +207,15 @@
 ;; JSON Schema Conversion (for function calling)
 ;; =============================================================================
 
+(defn- enum-value->json
+  "Render Malli enum members using their canonical JSON representation."
+  [value]
+  (if (keyword? value)
+    (if-let [keyword-ns (namespace value)]
+      (str keyword-ns "/" (name value))
+      (name value))
+    value))
+
 (defn malli-spec->json-schema
   "Convert a Malli spec to JSON Schema format for function calling parameters.
 
@@ -235,7 +244,7 @@
 
     ;; Enum - list allowed values
     (and (vector? spec) (= :enum (first spec)))
-    {:type "string" :enum (mapv str (rest spec))}
+    {:type "string" :enum (mapv enum-value->json (rest spec))}
 
     ;; Maybe - nullable
     (and (vector? spec) (= :maybe (first spec)))

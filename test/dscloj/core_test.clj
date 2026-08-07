@@ -339,7 +339,14 @@
 
   (testing "Enum converts to JSON Schema with allowed values"
     (is (= {:type "string" :enum ["a" "b" "c"]}
-           (dscloj/malli-spec->json-schema [:enum "a" "b" "c"]))))
+           (dscloj/malli-spec->json-schema [:enum "a" "b" "c"])))
+    (is (= {:type "string" :enum ["unchanged" "changed"]}
+           (dscloj/malli-spec->json-schema [:enum :unchanged :changed])))
+    (is (= {:type "string" :enum ["decision/unchanged" "decision/changed"]}
+           (dscloj/malli-spec->json-schema
+            [:enum :decision/unchanged :decision/changed])))
+    (is (= {:type "string" :enum [":unchanged" "changed"]}
+           (dscloj/malli-spec->json-schema [:enum ":unchanged" "changed"]))))
 
   (testing "Maybe converts to nullable"
     (is (= {:type "string" :nullable true}
@@ -420,6 +427,17 @@
       (is (= "object" (get-in tool-def [:function :parameters :properties "data" :type])))
       (is (= {:type "array" :items {:type "string"}}
              (get-in tool-def [:function :parameters :properties "data" :properties "items"])))))
+
+  (testing "Uses canonical JSON spellings for keyword enum outputs"
+    (let [module {:outputs [{:name :outcome
+                             :spec [:enum :unchanged :changed]
+                             :description "Learning outcome"}]}
+          tool-def (dscloj/outputs->tool-definition module)]
+      (is (= {:type "string"
+              :enum ["unchanged" "changed"]
+              :description "Learning outcome"}
+             (get-in tool-def
+                     [:function :parameters :properties "outcome"])))))
 
   (testing "Uses default description when instructions not provided"
     (let [module {:outputs [{:name :x :spec :string}]}
