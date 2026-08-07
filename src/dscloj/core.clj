@@ -216,6 +216,12 @@
       (name value))
     value))
 
+(defn- schema-children
+  "Return a vector Malli form's children, excluding an optional properties map."
+  [spec]
+  (cond-> (rest spec)
+    (map? (second spec)) rest))
+
 (defn malli-spec->json-schema
   "Convert a Malli spec to JSON Schema format for function calling parameters.
 
@@ -244,7 +250,15 @@
 
     ;; Enum - list allowed values
     (and (vector? spec) (= :enum (first spec)))
-    {:type "string" :enum (mapv enum-value->json (rest spec))}
+    {:type "string" :enum (mapv enum-value->json (schema-children spec))}
+
+    ;; Literal - require the exact JSON representation
+    (and (vector? spec) (= := (first spec)))
+    {:const (enum-value->json (first (schema-children spec)))}
+
+    ;; Union - preserve every alternative as a structured JSON Schema
+    (and (vector? spec) (= :or (first spec)))
+    {:oneOf (mapv malli-spec->json-schema (schema-children spec))}
 
     ;; Maybe - nullable
     (and (vector? spec) (= :maybe (first spec)))

@@ -348,6 +348,31 @@
     (is (= {:type "string" :enum [":unchanged" "changed"]}
            (dscloj/malli-spec->json-schema [:enum ":unchanged" "changed"]))))
 
+  (testing "Literal values convert to JSON Schema constants"
+    (is (= {:const "invoke"}
+           (dscloj/malli-spec->json-schema [:= :invoke])))
+    (is (= {:const "decision/invoke"}
+           (dscloj/malli-spec->json-schema [:= :decision/invoke])))
+    (is (= {:const ":invoke"}
+           (dscloj/malli-spec->json-schema [:= ":invoke"])))
+    (is (= {:const false}
+           (dscloj/malli-spec->json-schema [:= false]))))
+
+  (testing "Or converts every structured alternative"
+    (is (= {:oneOf
+            [{:type "object"
+              :properties {"action" {:const "invoke"}
+                           "capability" {:type "string"}}
+              :required ["action" "capability"]}
+             {:type "object"
+              :properties {"action" {:const "respond"}
+                           "message" {:type "string"}}
+              :required ["action" "message"]}]}
+           (dscloj/malli-spec->json-schema
+            [:or
+             [:map [:action [:= :invoke]] [:capability :string]]
+             [:map [:action [:= :respond]] [:message :string]]]))))
+
   (testing "Maybe converts to nullable"
     (is (= {:type "string" :nullable true}
            (dscloj/malli-spec->json-schema [:maybe :string]))))
@@ -439,11 +464,60 @@
              (get-in tool-def
                      [:function :parameters :properties "outcome"])))))
 
+  (testing "Keeps a root union of maps structured in the tool definition"
+    (let [module {:outputs
+                  [{:name :decision
+                    :spec [:or
+                           [:map
+                            [:action [:= :invoke]]
+                            [:capability :string]
+                            [:world-changing? :boolean]]
+                           [:map
+                            [:action [:= :respond]]
+                            [:message :string]]]}]}
+          decision-schema
+          (get-in (dscloj/outputs->tool-definition module)
+                  [:function :parameters :properties "decision"])]
+      (is (nil? (:type decision-schema)))
+      (is (= 2 (count (:oneOf decision-schema))))
+      (is (every? #(= "object" (:type %)) (:oneOf decision-schema)))
+      (is (= {:const "invoke"}
+             (get-in decision-schema
+                     [:oneOf 0 :properties "action"])))))
+
   (testing "Uses default description when instructions not provided"
     (let [module {:outputs [{:name :x :spec :string}]}
           tool-def (dscloj/outputs->tool-definition module)]
       (is (= "Submit the structured response"
              (get-in tool-def [:function :description]))))))
+
+(deftest function-calling-parses-structured-output-values-test
+  (let [parse-tool-call-response
+        (ns-resolve 'dscloj.core 'parse-tool-call-response)
+        response
+        {:choices
+         [{:message
+           {:tool-calls
+            [{:function
+              {:arguments
+               "{\"decision\":{\"action\":\"invoke\",\"capability\":\"filesystem.read-text\",\"world-changing?\":false}}"}}]}}]}
+        parsed
+        (parse-tool-call-response
+         response
+         [{:name :decision
+           :spec [:or
+                  [:map
+                   [:action [:= :invoke]]
+                   [:capability :string]
+                   [:world-changing? :boolean]]
+                  [:map [:action [:= :respond]] [:message :string]]]}])]
+    (is (= {:decision
+            {:action "invoke"
+             :capability "filesystem.read-text"
+             :world-changing? false}}
+           parsed))
+    (is (map? (:decision parsed))
+        "the structured value is not returned as JSON encoded text")))
 
 ;; =============================================================================
 ;; Multimodal Image Input Tests
