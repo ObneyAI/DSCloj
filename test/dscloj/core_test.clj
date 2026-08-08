@@ -375,7 +375,11 @@
 
   (testing "Maybe converts to nullable"
     (is (= {:type "string" :nullable true}
-           (dscloj/malli-spec->json-schema [:maybe :string]))))
+           (dscloj/malli-spec->json-schema [:maybe :string])))
+    (testing "without changing the child type when schema properties are present"
+      (is (= {:type "integer" :nullable true}
+             (dscloj/malli-spec->json-schema
+              [:maybe {:description "ACT composite score"} :int])))))
 
   (testing "Map converts to object with properties"
     (let [schema (dscloj/malli-spec->json-schema [:map [:name :string] [:age :int]])]
@@ -395,19 +399,37 @@
     (is (= {:type "array" :items {:type "string"}}
            (dscloj/malli-spec->json-schema [:vector :string])))
     (is (= {:type "array" :items {:type "integer"}}
-           (dscloj/malli-spec->json-schema [:vector :int]))))
+           (dscloj/malli-spec->json-schema [:vector :int])))
+    (is (= {:type "array" :items {:type "integer"}}
+           (dscloj/malli-spec->json-schema
+            [:vector {:description "Scores"} :int]))))
 
   (testing "Sequential converts to array"
     (is (= {:type "array" :items {:type "string"}}
-           (dscloj/malli-spec->json-schema [:sequential :string]))))
+           (dscloj/malli-spec->json-schema [:sequential :string])))
+    (is (= {:type "array" :items {:type "integer"}}
+           (dscloj/malli-spec->json-schema
+            [:sequential {:description "Scores"} :int]))))
 
   (testing "Set converts to array with uniqueItems"
     (is (= {:type "array" :items {:type "string"} :uniqueItems true}
-           (dscloj/malli-spec->json-schema [:set :string]))))
+           (dscloj/malli-spec->json-schema [:set :string])))
+    (is (= {:type "array" :items {:type "string"} :uniqueItems true}
+           (dscloj/malli-spec->json-schema
+            [:set {:description "Labels"} :string]))))
 
   (testing "Map-of converts to object with additionalProperties"
     (is (= {:type "object" :additionalProperties {:type "string"}}
-           (dscloj/malli-spec->json-schema [:map-of :keyword :string]))))
+           (dscloj/malli-spec->json-schema [:map-of :keyword :string])))
+    (is (= {:type "object" :additionalProperties {:type "integer"}}
+           (dscloj/malli-spec->json-schema
+            [:map-of {:description "Scores by subject"} :keyword :int]))))
+
+  (testing "Tuple converts every positional child when properties are present"
+    (is (= {:type "array"
+            :items [{:type "string"} {:type "integer"}]}
+           (dscloj/malli-spec->json-schema
+            [:tuple {:description "Label and score"} :string :int]))))
 
   (testing "Nested structures"
     (let [schema (dscloj/malli-spec->json-schema

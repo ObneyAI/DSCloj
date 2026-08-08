@@ -262,7 +262,7 @@
 
     ;; Maybe - nullable
     (and (vector? spec) (= :maybe (first spec)))
-    (let [inner (malli-spec->json-schema (second spec))]
+    (let [inner (malli-spec->json-schema (first (schema-children spec)))]
       (if (:type inner)
         (assoc inner :nullable true)
         inner))
@@ -285,19 +285,24 @@
 
     ;; Map-of - object with additionalProperties
     (and (vector? spec) (= :map-of (first spec)))
-    {:type "object" :additionalProperties (malli-spec->json-schema (nth spec 2))}
+    {:type "object"
+     :additionalProperties (malli-spec->json-schema
+                            (second (schema-children spec)))}
 
     ;; Vector/sequential - array
     (and (vector? spec) (#{:vector :sequential} (first spec)))
-    {:type "array" :items (malli-spec->json-schema (second spec))}
+    {:type "array"
+     :items (malli-spec->json-schema (first (schema-children spec)))}
 
     ;; Set - array with unique items
     (and (vector? spec) (= :set (first spec)))
-    {:type "array" :items (malli-spec->json-schema (second spec)) :uniqueItems true}
+    {:type "array"
+     :items (malli-spec->json-schema (first (schema-children spec)))
+     :uniqueItems true}
 
     ;; Tuple - array with positional items
     (and (vector? spec) (= :tuple (first spec)))
-    {:type "array" :items (mapv malli-spec->json-schema (rest spec))}
+    {:type "array" :items (mapv malli-spec->json-schema (schema-children spec))}
 
     ;; Wrapped specs like [:string {:min 1}] - recurse on first element
     (vector? spec)
